@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Math Survival: Equation Defense</title>
+<style>
+  body, html {
+    margin: 0; padding: 0; overflow: hidden;
+    font-family: monospace, monospace;
+    background: #222;
+    color: #0f0;
+    user-select: none;
+  }
+  #overlay {
+    position: fixed;
+    top: 10px; left: 10px;
+    z-index: 10;
+    background: rgba(0,0,0,0.6);
+    padding: 5px 10px;
+    border-radius: 5px;
+  }
+  #instructions {
+    position: fixed;
+    bottom: 10px; left: 10px;
+    width: 250px;
+    font-size: 14px;
+    background: rgba(0,0,0,0.6);
+    padding: 10px;
+    border-radius: 5px;
+    line-height: 1.3em;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <div><b>Equation:</b> <span id="equation">4 + 3 = ?</span></div>
+  <div><b>Ammo:</b> <span id="ammo">---</span></div>
+  <div><b>Health:</b> <span id="health">100</span></div>
+  <div><b>Weapon:</b> <span id="weapon">AR-15</span></div>
+  <div><b>Wave:</b> <span id="wave">1</span></div>
+</div>
+
+<div id="instructions">
+  Controls:<br/>
+  WASD - Move<br/>
+  Mouse - Aim & Shoot (hold left click)<br/>
+  Space - Jump<br/>
+  Shift - Sprint<br/>
+  Tab - Aim down sights<br/>
+  R - Reload<br/>
+  1-4 - Switch Weapons<br/>
+  <br/>
+  Survive the math test!  
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/controls/PointerLockControls.js"></script>
+
+<script>
+(() => {
+  // === Setup ===
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+  const renderer = new THREE.WebGLRenderer({antialias: false});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  const controls = new THREE.PointerLockControls(camera, document.body);
+
+  document.body.addEventListener('click', () => {
+    controls.lock();
+  });
+
+  // Movement vars
+  let velocity = new THREE.Vector3();
+  let direction = new THREE.Vector3();
+  let canJump = false;
+  let isSprinting = false;
+  let isAiming = false;
+
+  const walkSpeed = 5;
+  const sprintSpeed = 9;
+  const jumpSpeed = 8;
+  const gravity = 20;
+
+  // Keyboard state
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if(['Tab','Space'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', e => keys[e.code] = false);
+
+  // Floor & house dims
+  const floorHeight = 10;
+  const houseWidth = 40;
+  const houseDepth = 40;
+
+  // UI Elements
+  const ammoElem = document.getElementById('ammo');
+  const healthElem = document.getElementById('health');
+  const weaponElem = document.getElementById('weapon');
+  const waveElem = document.getElementById('wave');
+  const equationElem = document.getElementById('equation');
+
+  // Player
+  const player = {
+    height: 1.8,
+    health: 100,
+    velocityY: 0,
+  };
+
+  // Respawn & immunity
+  let isRespawning = false;
+  const immunityTime = 3; // seconds
+  let immunityTimer = 0;
+
+  // === Weapons ===
+  const weapons = {
+    ar15: {
+      name: "AR-15",
+      fireRate: 0.12,
+      ammoMax: 30,
+      ammo: 30,
+      reloadTime: 2,
+      damage: 15,
+      lastShotTime: 0,
+    },
+    sniper: {
+      name: "Sniper",
+      fireRate: 1.2,
+      ammoMax: 5,
+      ammo: 5,
+      reloadTime: 3,
+      damage: 80,
+      lastShotTime: 0,
+    },
+    smg: {
+      name: "SMG",
+      fireRate: 0.07,
+      ammoMax: 40,
+      ammo: 40,
+      reloadTime: 1.5,
+      damage: 10,
+      lastShotTime: 0,
+    },
+    shotgun: {
+      name: "Shotgun",
+      fireRate: 0.9,
+      ammoMax: 8,
+      ammo: 8,
+      reloadTime: 2.5,
+      damage: 40,
+      pellets: 6,
+      lastShotTime: 0,
+    },
+  };
+
+  let currentWeaponKey = "ar15";
+  let reloading = false;
+  let reloadStart = 0;
+
+  function updateAmmo() {
+    const w = weapons[currentWeaponKey];
+    ammoElem.textContent = `${w.ammo} / ${w.ammoMax}`;
+    weaponElem.textContent = w.name;
+  }
+  updateAmmo();
+
+  // === Math equation generator (disguise) ===
+  function newEquation() {
+    const a = Math.floor(Math.random()*20);
+    const b = Math.floor(Math.random()*20);
+    equationElem.textContent = `${a} + ${b} = ?`;
+  }
+  newEquation();
+
+  // === House Construction ===
+  const floorGeometry = new THREE.BoxGeometry(houseWidth, 1, houseDepth);
+  const floorMaterial = new THREE.MeshStandardMaterial({color: 0x222222});
+  const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+  floor.position.y = 0;
+  scene.add(floor);
+
+  const wallHeight = floorHeight * 2;
+  const wallThickness = 1;
+
+  function makeWall(w, h, d, x, y, z) {
+    const geom = new THREE.BoxGeometry(w, h, d);
+    const mat = new THREE.MeshStandardMaterial({color: 0x444444});
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+    return mesh;
+  }
+
+  const frontWall = makeWall(houseWidth, wallHeight, wallThickness, 0, wallHeight/2, -houseDepth/2);
+  const backWall = makeWall(houseWidth, wallHeight, wallThickness, 0, wallHeight/2, houseDepth/2);
+  const leftWall = makeWall(wallThickness, wallHeight, houseDepth, -houseWidth/2, wallHeight/2, 0);
+  const rightWall = makeWall(wallThickness, wallHeight, houseDepth, houseWidth/2, wallHeight/2, 0);
+
+  function addBoardsToWall(wallMesh, horizontalCount, verticalCount) {
+    const boards = [];
+    const w = wallMesh.geometry.parameters.width || wallMesh.geometry.parameters.depth; 
+    const h = wallMesh.geometry.parameters.height;
+    for(let i=1; i<=horizontalCount; i++) {
+      for(let j=1; j<=verticalCount; j++) {
+        const boardW = w / (horizontalCount * 1.2);
+        const boardH = h / (verticalCount * 1.2);
+        const boardT = 0.2;
+        const boardGeom = new THREE.BoxGeometry(boardW, boardH, boardT);
+        const boardMat = new THREE.MeshStandardMaterial({color: 0x666666});
+        const board = new THREE.Mesh(boardGeom, boardMat);
+        const posX = (i - (horizontalCount+1)/2) * (w/horizontalCount);
+        const posY = (j - (verticalCount+1)/2) * (h/verticalCount);
+        let offsetZ = 0;
+        if(wallMesh === frontWall) offsetZ = 0.6;
+        else if(wallMesh === backWall) offsetZ = -0.6;
+        else if(wallMesh === leftWall) offsetZ = 0.6;
+        else if(wallMesh === rightWall) offsetZ = -0.6;
+
+        if(wallMesh === frontWall || wallMesh === backWall) {
+          board.position.set(posX, posY, offsetZ);
+        } else {
+          board.rotation.y = Math.PI/2;
+          board.position.set(offsetZ, posY, posX);
+        }
+        wallMesh.add(board);
+        boards.push(board);
+      }
+    }
+    return boards;
+  }
+  addBoardsToWall(frontWall, 5, 4);
+  addBoardsToWall(backWall, 5, 4);
+  addBoardsToWall(leftWall, 4, 3);
+  addBoardsToWall(rightWall, 4, 3);
+
+  const secondFloor = makeWall(houseWidth-2, 1, houseDepth-2, 0, floorHeight, 0);
+  secondFloor.material.color.set(0x333333);
+
+  const roof = makeWall(houseWidth, 1, houseDepth, 0, wallHeight + 0.5, 0);
+  roof.material.color.set(0x555555);
+
+  // Lighting
+  const ambientLight = new THREE.AmbientLight(0x888888);
+  scene.add(ambientLight);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  directionalLight.position.set(1, 3, 2);
+  scene.add(directionalLight);
+
+  // Add player to scene
+  controls.getObject().position.set(0, player.height, 0);
+  scene.add(controls.getObject());
+
+  // Ground collision check
+  function checkFloorCollision(pos) {
+    if(pos.y < player.height) {
+      pos.y = player.height;
+      player.velocityY = 0;
+      canJump = true;
+    }
+  }
+
+  // === Zombie class with limb animation ===
+  class Zombie {
+    constructor(x, z) {
+      this.group = new THREE.Group();
+
+      const skinMat = new THREE.MeshStandardMaterial({color: 0x228822});
+      const blackMat = new THREE.MeshStandardMaterial({color: 0x000000});
+
+      // Head
+      const head = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), skinMat);
+      head.position.set(0,2.8,0);
+      this.group.add(head);
+
+      // Eyes
+      const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.2,0.1), blackMat);
+      eyeL.position.set(-0.25,3,0.5);
+      const eyeR = eyeL.clone();
+      eyeR.position.x = 0.25;
+      this.group.add(eyeL, eyeR);
+
+      // Body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1,1.5,0.5), skinMat);
+      body.position.set(0,1.3,0);
+      this.group.add(body);
+
+      // Arms
+      this.armL = new THREE.Mesh(new THREE.BoxGeometry(0.3,1.2,0.3), skinMat);
+      this.armL.position.set(-0.9,1.5,0);
+      this.group.add(this.armL);
+      this.armR = this.armL.clone();
+      this.armR.position.x = 0.9;
+      this.group.add(this.armR);
+
+      // Legs
+      this.legL = new THREE.Mesh(new THREE.BoxGeometry(0.4,1,0.4), skinMat);
+      this.legL.position.set(-0.3,0.5,0);
+      this.group.add(this.legL);
+      this.legR = this.legL.clone();
+      this.legR.position.x = 0.3;
+      this.group.add(this.legR);
+
+      this.group.position.set(x,0,z);
+
+      this.speed = 1.3 + Math.random() * 0.5;
+      this.health = 50;
+      this.alive = true;
+
+      this.movementTimer = 0;
+    }
+
+    update(delta, playerPos) {
+      if(!this.alive) return;
+      const dir = new THREE.Vector3();
+      dir.subVectors(playerPos, this.group.position);
+      dir.y = 0;
+      const dist = dir.length();
+      dir.normalize();
+
+      if(dist > 1) {
+        this.group.position.addScaledVector(dir, this.speed * delta);
+        const angle = Math.atan2(dir.x, dir.z);
+        this.group.rotation.y = angle;
+
+        // Limb swing animation
+        this.movementTimer += delta * 8;
+        const swingAmount = Math.sin(this.movementTimer) * 0.5;
+
+        this.armL.rotation.x = swingAmount;
+        this.armR.rotation.x = -swingAmount;
+        this.legL.rotation.x = -swingAmount;
+        this.legR.rotation.x = swingAmount;
+      } else {
+        this.armL.rotation.x = 0;
+        this.armR.rotation.x = 0;
+        this.legL.rotation.x = 0;
+        this.legR.rotation.x = 0;
+      }
+    }
+
+    damage(amount) {
+      this.health -= amount;
+      if(this.health <= 0) {
+        this.alive = false;
+        scene.remove(this.group);
+      }
+    }
+  }
+
+  // Zombies list
+  const zombies = [];
+
+  // Wave system variables
+  let currentWave = 1;
+  let zombiesToSpawn = 0;
+  let zombiesAlive = 0;
+  let waveInProgress = false;
+  const spawnInterval = 1.5;
+  let spawnTimer = 0;
+
+  // Spawn zombie with difficulty multiplier
+  function spawnZombie(difficultyMultiplier = 1) {
+    const spawnDist = 30;
+    const angle = Math.random() * Math.PI * 2;
+    const x = Math.cos(angle) * spawnDist;
+    const z = Math.sin(angle) * spawnDist;
+    const zmb = new Zombie(x, z);
+    zmb.health *= difficultyMultiplier;
+    zmb.speed *= difficultyMultiplier;
+    scene.add(zmb.group);
+    zombies.push(zmb);
+    zombiesAlive++;
+  }
+
+  // Start new wave
+  function startWave(waveNum) {
+    zombiesToSpawn = 5 + waveNum * 3;
+    zombiesAlive = 0;
+    waveInProgress = true;
+    spawnTimer = 0;
+    currentWave = waveNum;
+    waveElem.textContent = currentWave;
+  }
+
+  // === Raycaster for shooting ===
+  const raycaster = new THREE.Raycaster();
+
+  // Mouse hold shoot
+  let mouseDown = false;
+  window.addEventListener('mousedown', () => { mouseDown = true; });
+  window.addEventListener('mouseup', () => { mouseDown = false; });
+
+  // === Shooting function ===
+  function shootWeapon() {
+    if(reloading) return;
+    const now = performance.now() / 1000;
+    const w = weapons[currentWeaponKey];
+    if(now - w.lastShotTime < w.fireRate) return;
+    if(w.ammo <= 0) return;
+
+    w.ammo--;
+    updateAmmo();
+    w.lastShotTime = now;
+
+    raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+
+    if(currentWeaponKey === "shotgun") {
+      const hits = [];
+      for(let i=0; i<w.pellets; i++) {
+        const spreadX = (Math.random()-0.5)*0.1;
+        const spreadY = (Math.random()-0.5)*0.1;
+        const dir = new THREE.Vector3(0,0,-1);
+        dir.applyQuaternion(camera.quaternion);
+        dir.x += spreadX;
+        dir.y += spreadY;
+        dir.normalize();
+        raycaster.set(camera.position, dir);
+        const hit = checkZombieHit(raycaster);
+        if(hit) hits.push(hit);
+      }
+      for(let h of hits) h.damage(w.damage);
+    } else {
+      const hit = checkZombieHit(raycaster);
+      if(hit) hit.damage(w.damage);
+    }
+  }
+
+  // Check raycaster hits
+  function checkZombieHit(ray) {
+    const intersects = [];
+    for(let zmb of zombies) {
+      if(!zmb.alive) continue;
+      const bb = new THREE.Box3().setFromObject(zmb.group);
+      if(ray.ray.intersectsBox(bb)) intersects.push(zmb);
+    }
+    if(intersects.length === 0) return null;
+    intersects.sort((a,b) => {
+      return a.group.position.distanceTo(camera.position) - b.group.position.distanceTo(camera.position);
+    });
+    return intersects[0];
+  }
+
+  // Reload function
+  function startReload() {
+    if(reloading) return;
+    const w = weapons[currentWeaponKey];
+    if(w.ammo === w.ammoMax) return;
+    reloading = true;
+    reloadStart = performance.now() / 1000;
+  }
+
+  // Switch weapons
+  function switchWeapon(num) {
+    const keys = Object.keys(weapons);
+    if(num < 1 || num > keys.length) return;
+    currentWeaponKey = keys[num-1];
+    updateAmmo();
+    showGun(currentWeaponKey);
+  }
+
+  // Sprint & Aim speed
+  function getCurrentSpeed() {
+    if(isAiming) return walkSpeed * 0.6;
+    if(isSprinting) return sprintSpeed;
+    return walkSpeed;
+  }
+
+  // Gun Models (simple blocks) attached to camera
+  const gunModels = {};
+  let currentGunModel = null;
+
+  function createGunModels() {
+    const skinMat = new THREE.MeshStandardMaterial({color: 0x444455});
+    const barrelMat = new
